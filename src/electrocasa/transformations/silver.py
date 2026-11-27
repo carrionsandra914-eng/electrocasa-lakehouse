@@ -484,7 +484,11 @@ def stg_tracking_envios():
         "CAST(evento_id AS BIGINT) AS evento_id",
         "nullif(trim(tracking_id), '') AS tracking_id",
         "nullif(trim(venta_id), '') AS venta_id",
-        "initcap(regexp_replace(lower(trim(courier)), '[_-]+', ' ')) AS courier",
+        """CASE
+             WHEN lower(courier) LIKE '%olva%' THEN 'Olva Courier'
+             WHEN lower(courier) LIKE '%servientrega%' THEN 'Servientrega'
+             WHEN lower(courier) LIKE '%shalom%' THEN 'Shalom'
+             ELSE initcap(trim(courier)) END AS courier""",
         """CASE
              WHEN lower(estado_entrega) LIKE '%pend%' THEN 'pendiente'
              WHEN lower(estado_entrega) LIKE '%camino%' OR lower(estado_entrega) LIKE '%transit%'

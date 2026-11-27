@@ -22,7 +22,7 @@ targets:
     default: true
     variables:
       catalog: electrocasa_dev
-      tracking_pipeline_id: "REEMPLAZAR_CON_ID_DEL_PIPELINE_DE_TRACKING_DEV"
+      tracking_pipeline_id: "c574e110-1a90-4ebe-87cc-d6daaade0f00"
 
   prod:
     mode: production
