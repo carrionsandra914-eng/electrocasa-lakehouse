@@ -1,0 +1,70 @@
+resources:
+  jobs:
+    electrocasa_job:
+      name: electrocasa_job_${bundle.target}
+      description: >
+        Orquestación end to end: COPY INTO (catálogo y sucursales) -> ingesta de Tracking
+        (Lakeflow Connect) -> pipeline Medallion -> validación.
+      max_concurrent_runs: 1
+
+      # Disparo por llegada de archivo: los lotes llegan de forma irregular (mayo, agosto,
+      # octubre) al volume de landing; correr apenas aterriza un lote evita un schedule
+      # que corre en vacío la mayoría de los días.
+      trigger:
+        pause_status: ${var.trigger_pause_status}
+        file_arrival:
+          url: /Volumes/${var.catalog}/default/vol_landing/
+          min_time_between_triggers_seconds: 300
+          wait_after_last_change_seconds: 180
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+        on_success:
+          - ${workspace.current_user.userName}
+      notification_settings:
+        no_alert_for_skipped_runs: true
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+
+      tasks:
+        - task_key: copy_into_bronze
+          description: COPY INTO idempotente de catálogo (snapshots JSON) y sucursales (CSV)
+          notebook_task:
+            notebook_path: ../src/electrocasa/ingesta/copy_into_bronze.py
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+          timeout_seconds: 1800
+
+        - task_key: ingesta_tracking
+          description: Conector query-based de SQL Server (cursor fecha_modificacion, PK evento_id)
+          depends_on:
+            - task_key: copy_into_bronze
+          pipeline_task:
+            pipeline_id: ${var.tracking_pipeline_id}
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          timeout_seconds: 3600
+
+        - task_key: pipeline_medallion
+          description: Bronze (Auto Loader) -> Silver (calidad, SCD2, cuarentena) -> Gold
+          depends_on:
+            - task_key: ingesta_tracking
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.electrocasa_pipeline.id}
+            full_refresh: false
+          max_retries: 1
+          min_retry_interval_millis: 120000
+          timeout_seconds: 3600
+
+        - task_key: validacion
+          description: Conteos Silver/Gold, rechazados por fuente y falla si Gold queda vacío
+          depends_on:
+            - task_key: pipeline_medallion
+          notebook_task:
+            notebook_path: ../src/electrocasa/validacion/validacion.py
+          max_retries: 0
+          timeout_seconds: 900

@@ -1,0 +1,37 @@
+# Declarative Automation Bundle - ElectroCasa Lakehouse
+bundle:
+  name: electrocasa-lakehouse
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Catálogo de Unity Catalog del target (uno por ambiente)
+  tracking_pipeline_id:
+    description: >
+      ID del pipeline de ingesta de Tracking (conector query-based de SQL Server,
+      Lakeflow Connect) creado desde la UI. Se ve en Jobs & Pipelines > (pipeline) > Pipeline details.
+  trigger_pause_status:
+    description: Estado del trigger por llegada de archivo del job
+    default: PAUSED
+
+targets:
+  dev:
+    mode: development          # prefija los recursos con [dev usuario] y pausa los triggers
+    default: true
+    variables:
+      catalog: electrocasa_dev
+      tracking_pipeline_id: "REEMPLAZAR_CON_ID_DEL_PIPELINE_DE_TRACKING_DEV"
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: electrocasa_prod
+      tracking_pipeline_id: "REEMPLAZAR_CON_ID_DEL_PIPELINE_DE_TRACKING_PROD"
+      trigger_pause_status: UNPAUSED
+    permissions:
+      - level: CAN_MANAGE
+        group_name: electrocasa_ingenieria

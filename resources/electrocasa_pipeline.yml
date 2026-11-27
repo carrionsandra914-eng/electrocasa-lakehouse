@@ -1,0 +1,15 @@
+resources:
+  pipelines:
+    electrocasa_pipeline:
+      name: electrocasa_pipeline_${bundle.target}
+      catalog: ${var.catalog}
+      schema: silver                 # schema por defecto; las tablas usan bronze./silver./gold. explícito
+      serverless: true               # carga por lotes, chica y esporádica: serverless arranca rápido y no cobra en ocio
+      continuous: false              # modo triggered (nunca continuo en serverless)
+      channel: CURRENT
+      libraries:
+        - glob:
+            include: ../src/electrocasa/transformations/**
+      configuration:
+        catalog: ${var.catalog}
+        landing_path: /Volumes/${var.catalog}/default/vol_landing

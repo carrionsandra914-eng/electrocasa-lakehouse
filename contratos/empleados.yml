@@ -1,0 +1,126 @@
+# Contrato de datos: Empleados (RR.HH.)
+fuente: empleados
+version: 1
+ultima_actualizacion: "2026-11-26"
+responsable: "recursos_humanos"
+llegada: "CSV con encabezado, un archivo de eventos por lote en /Volumes/<catalogo>/default/vol_landing/empleados/"
+metodo_ingesta: "Auto Loader dentro del pipeline: lotes incrementales de eventos; solo se procesan archivos nuevos"
+frecuencia_esperada: "mensual o por cierre (lotes al 31-may, 31-ago, 31-oct), con eventos registrados tarde"
+tabla_bronze: "<catalogo>.bronze.empleados"
+tabla_silver: "<catalogo>.silver.empleados_eventos y <catalogo>.silver.empleados_scd2"
+llave_evento: "id_empleado + tipo_evento + fecha_evento + fecha_registro"
+llave_entidad: "id_empleado (+ version en la tabla historizada)"
+historizacion:
+  tipo: SCD Type 2
+  implementacion: "Intervalos armados a mano con funciones de ventana en una materialized view (silver.empleados_scd2). Cada refresh recalcula la historia con todos los eventos, así un evento tardío se inserta en su lugar."
+  columnas_de_vigencia: ["vigente_desde", "vigente_hasta", "es_version_actual"]
+  orden_de_los_cambios: "fecha_evento y, a igualdad, fecha_registro (ambas de la fuente; nunca current_timestamp())"
+  eventos_mismo_dia: "decide fecha_registro: el evento registrado primero es la versión anterior; el intervalo de la primera queda vacío [d, d) y vale la segunda"
+  llegada_tardia: "un evento de junio que llega en el lote de octubre se ordena por su fecha_evento: corta el intervalo de la versión anterior y la versión siguiente empieza después; no se usa el orden de llegada"
+
+columnas:
+  - nombre: id_empleado
+    tipo: "string"
+    nulo: false
+  - nombre: nombre
+    tipo: "string"
+    nulo: false
+  - nombre: dni
+    tipo: "string"
+    nulo: true
+    sensible: true
+    masking: "MASK <catalogo>.default.mask_dni en el schema de las tablas del pipeline: valor real solo si is_account_group_member('electrocasa_ingenieria'); el resto ve '*****' + últimos 3 dígitos"
+  - nombre: email
+    tipo: "string"
+    nulo: false
+  - nombre: salario
+    tipo: "decimal(10,2)"
+    nulo: true
+    regla: "entre 900 y 20000; fuera de rango -> NULL (warn) y la historia arrastra el último salario válido"
+    sensible: true
+    masking: "MASK <catalogo>.default.mask_salario: valor real solo para electrocasa_ingenieria; el resto ve NULL"
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: cargo
+    tipo: "string"
+    nulo: false
+  - nombre: tipo_evento
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["alta", "transferencia", "cambio_salario", "baja"]
+  - nombre: fecha_evento
+    tipo: "date"
+    nulo: false
+  - nombre: fecha_registro
+    tipo: "timestamp"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: evento_ubicable
+    condicion: "id_empleado IS NOT NULL AND fecha_evento IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin empleado o sin fecha el evento no se puede ubicar en la historia y rompería los intervalos. No es 'fail' porque detendría todo el pipeline por 38 filas; se aíslan en cuarentena para que RR.HH. las corrija."
+  - nombre: tipo_evento_valido
+    condicion: "tipo_evento IN ('alta','baja','transferencia','cambio_salario')"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Un tipo desconocido no se puede interpretar en la historia."
+  - nombre: salario_en_rango
+    condicion: "salario_en_rango"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "El salario no participa en las preguntas; el evento (p. ej. una transferencia) sí. Se conserva el evento con salario NULL."
+  - nombre: dni_informado
+    condicion: "dni IS NOT NULL"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "El dni no se usa para ubicar al empleado (la llave es id_empleado)."
+  - nombre: dni_unico
+    condicion: "NOT dni_duplicado"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Mismo dni en dos empleados distintos = error de digitación: se conservan ambos (son personas distintas por id_empleado) y se marcan para que RR.HH. corrija."
+
+transformaciones_silver:
+  - "tipo_evento: 13 variantes -> 4 valores (cese -> baja; 'Cambio Salario' -> cambio_salario)"
+  - "fechas a DATE / TIMESTAMP con try_to_timestamp"
+  - "salario fuera de rango -> NULL; en SCD2 se arrastra el último salario válido"
+  - "marca dni_duplicado"
+  - "deduplicación por id_empleado + tipo_evento + fecha_evento + fecha_registro"
+  - "SCD2: version, vigente_desde, vigente_hasta (lead de fecha_evento), es_version_actual, estado (baja -> inactivo), fecha_alta"
+
+problemas_conocidos:
+  - problema: "tipo_evento con 13 formas, incluido cese"
+    ejemplo: "ALTA, Alta, Cambio Salario, CAMBIO_SALARIO, cese, BAJA"
+    filas_afectadas: "todas"
+    tratamiento: "mapeo a 4 valores"
+  - problema: "dos eventos del mismo empleado el mismo día"
+    ejemplo: "transferencia y cambio_salario con igual fecha_evento"
+    filas_afectadas: "38 pares"
+    tratamiento: "orden por fecha_registro"
+  - problema: "eventos registrados tarde que llegan en un lote posterior"
+    ejemplo: "evento con fecha_evento de julio en empleados_lote_03"
+    filas_afectadas: "63 en el lote 3"
+    tratamiento: "la historia se recalcula ordenando por fecha_evento"
+  - problema: "dni vacío"
+    ejemplo: "dni=''"
+    filas_afectadas: "58"
+    tratamiento: "warn dni_informado"
+  - problema: "mismo dni en dos empleados distintos"
+    ejemplo: "dos id_empleado con el mismo dni"
+    filas_afectadas: "6 dni"
+    tratamiento: "warn dni_unico, se conservan ambos"
+  - problema: "fecha_evento vacía"
+    ejemplo: "fecha_evento=''"
+    filas_afectadas: "38"
+    tratamiento: "drop evento_ubicable"
+  - problema: "salario un orden de magnitud fuera de rango"
+    ejemplo: "246616.0 (esperable ~2466)"
+    filas_afectadas: "18"
+    tratamiento: "NULL + warn salario_en_rango"
+  - problema: "empleados cuyo primer evento no es un alta"
+    ejemplo: "primer evento cambio_salario"
+    filas_afectadas: "11 empleados"
+    tratamiento: "no cuentan en dotación hasta tener un alta (P3 exige alta en esa fecha o antes)"

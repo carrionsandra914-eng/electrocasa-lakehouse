@@ -1,0 +1,94 @@
+# Contrato de datos: Devoluciones
+fuente: devoluciones
+version: 1
+ultima_actualizacion: "2026-11-26"
+responsable: "postventa"
+llegada: "CSV con encabezado por lote en /Volumes/<catalogo>/default/vol_landing/devoluciones/"
+metodo_ingesta: "Auto Loader dentro del pipeline: lotes incrementales, igual que ventas"
+frecuencia_esperada: "mensual o por cierre (lotes al 31-may, 31-ago, 31-oct)"
+tabla_bronze: "<catalogo>.bronze.devoluciones"
+tabla_silver: "<catalogo>.silver.devoluciones"
+llave: "devolucion_id"
+depende_de:
+  - fuente: ventas
+    columna: venta_id
+
+columnas:
+  - nombre: devolucion_id
+    tipo: "string"
+    nulo: false
+  - nombre: venta_id
+    tipo: "string"
+    nulo: false
+    regla: "debe existir en silver.ventas; si no existe (o es nula) se descarta a cuarentena porque no se puede validar el monto"
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+  - nombre: motivo
+    tipo: "string"
+    nulo: false            # vacío -> 'sin_motivo'
+  - nombre: monto_reembolso
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "entre 0 y el monto_total de la venta de origen"
+  - nombre: fecha_devolucion
+    tipo: "date"
+    nulo: false
+  - nombre: monto_venta
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "columna derivada: monto_total de la venta de origen (join con silver.ventas)"
+
+reglas_de_calidad:
+  - nombre: reembolso_valido
+    condicion: "monto_reembolso IS NOT NULL AND monto_reembolso >= 0 AND (monto_venta IS NULL OR monto_reembolso <= monto_venta)"   # la venta inexistente la frena venta_origen_existe
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Un reembolso negativo o mayor que la venta inflaría o desinflaría las ventas netas (P1) y la tasa de devolución (P2). Se evalúa sobre la vista ya unida con ventas (stg_devoluciones)."
+  - nombre: venta_origen_existe
+    condicion: "monto_venta IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin la venta de origen no se puede validar el monto; aceptar reembolsos no verificables arriesga restar dinero que nunca entró."
+  - nombre: fecha_valida
+    condicion: "fecha_devolucion IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin fecha no hay mes para P1."
+  - nombre: motivo_informado
+    condicion: "motivo <> 'sin_motivo'"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "El motivo no se usa en las preguntas; la devolución cuenta igual."
+
+transformaciones_silver:
+  - "monto_reembolso: coma decimal -> decimal(12,2)"
+  - "motivo vacío -> 'sin_motivo'; minúsculas"
+  - "fecha_devolucion a DATE"
+  - "deduplicación por devolucion_id"
+  - "join con silver.ventas para traer monto_venta"
+
+problemas_conocidos:
+  - problema: "monto_reembolso negativo"
+    ejemplo: "-10681.92"
+    filas_afectadas: "38"
+    tratamiento: "drop reembolso_valido"
+  - problema: "monto_reembolso mayor que la venta de origen"
+    ejemplo: "reembolso 12682.13 sobre una venta menor"
+    filas_afectadas: "83"
+    tratamiento: "drop reembolso_valido"
+  - problema: "motivo vacío"
+    ejemplo: "motivo=''"
+    filas_afectadas: "71"
+    tratamiento: "'sin_motivo' + warn"
+  - problema: "venta_id vacío o inexistente"
+    ejemplo: "venta_id='' / VTA que no está en ventas"
+    filas_afectadas: "35 vacíos; 65 sin venta (incluye los vacíos)"
+    tratamiento: "drop venta_origen_existe"
+  - problema: "devoluciones del lote anterior repetidas"
+    ejemplo: "mismo devolucion_id en dos lotes"
+    filas_afectadas: "60"
+    tratamiento: "deduplicación por devolucion_id"

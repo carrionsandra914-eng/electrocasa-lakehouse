@@ -1,0 +1,108 @@
+# Contrato de datos: Reseñas
+fuente: resenas
+version: 1
+ultima_actualizacion: "2026-11-26"
+responsable: "atencion_al_cliente"
+llegada: "JSON Lines (un objeto por línea) por lote en /Volumes/<catalogo>/default/vol_landing/resenas/"
+metodo_ingesta: "Auto Loader dentro del pipeline: lotes incrementales; schema explícito con tags array<string>, respuestas array<struct> y metadata como texto JSON"
+frecuencia_esperada: "trimestral (lotes al 31-jul y 31-oct)"
+tabla_bronze: "<catalogo>.bronze.resenas"
+tabla_silver: "<catalogo>.silver.resenas"
+llave: "resena_id"
+
+columnas:
+  - nombre: resena_id
+    tipo: "string"
+    nulo: false
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+    regla: "si no existe en el catálogo la reseña se conserva en Silver (warn) pero NO entra en P5 (join interno con el catálogo)"
+  - nombre: cliente_id
+    tipo: "string"
+    nulo: false
+  - nombre: calificacion
+    tipo: "int"
+    nulo: false
+    regla: "entero entre 1 y 5"
+  - nombre: comentario
+    tipo: "string"
+    nulo: true
+  - nombre: tags
+    tipo: "array<string>"
+    nulo: false            # NULL se normaliza a arreglo vacío: ambos significan 'sin etiquetas'
+  - nombre: respuestas
+    tipo: "array<struct<autor:string,texto:string,fecha:date>>"
+    nulo: false
+  - nombre: fecha_resena
+    tipo: "date"
+    nulo: false
+  - nombre: metadata
+    tipo: "variant"
+    nulo: true
+
+reglas_de_calidad:
+  - nombre: calificacion_en_escala
+    condicion: "calificacion IS NOT NULL AND calificacion BETWEEN 1 AND 5"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "P5 exige excluir las calificaciones inválidas del numerador y del denominador; no hay forma de inferir la calificación real."
+  - nombre: producto_en_catalogo
+    condicion: "en_catalogo"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "La reseña es válida como dato de cliente; solo queda fuera de P5 porque no tiene categoría."
+  - nombre: fecha_valida
+    condicion: "fecha_resena IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin fecha no hay mes para P5."
+  - nombre: resena_id_no_nulo
+    condicion: "resena_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Llave para deduplicar reingestas."
+  - nombre: comentario_informado
+    condicion: "comentario IS NOT NULL"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Una reseña sin texto sigue teniendo calificación válida."
+
+transformaciones_silver:
+  - "calificacion a INT (solo enteros)"
+  - "comentario vacío -> NULL"
+  - "tags NULL -> arreglo vacío"
+  - "respuestas sin autor -> autor 'desconocido'; fecha de respuesta a DATE"
+  - "fecha_resena: yyyy-MM-dd y dd/MM/yyyy -> DATE"
+  - "metadata: texto JSON -> VARIANT (try_parse_json); se extraen origen y app_version"
+  - "deduplicación por resena_id (reingestas del lote 1 en el lote 2)"
+
+problemas_conocidos:
+  - problema: "calificacion fuera de escala"
+    ejemplo: "0, 6 o null"
+    filas_afectadas: "103 (28 en 0, 38 en 6, 37 nulas)"
+    tratamiento: "drop calificacion_en_escala"
+  - problema: "tags nulo en vez de arreglo vacío"
+    ejemplo: "\"tags\": null"
+    filas_afectadas: "89"
+    tratamiento: "coalesce a []"
+  - problema: "respuestas sin autor"
+    ejemplo: "{\"texto\": \"...\", \"fecha\": \"...\"}"
+    filas_afectadas: "8"
+    tratamiento: "autor = 'desconocido'"
+  - problema: "producto_id inexistente en el catálogo"
+    ejemplo: "producto fuera de ambos snapshots"
+    filas_afectadas: "113"
+    tratamiento: "warn; fuera de P5"
+  - problema: "fecha_resena en dos formatos"
+    ejemplo: "2026-07-14 / 14/07/2026"
+    filas_afectadas: "80 dd/MM/yyyy"
+    tratamiento: "coalesce de formatos"
+  - problema: "reseñas del lote 1 repetidas en el lote 2"
+    ejemplo: "mismo resena_id en ambos lotes"
+    filas_afectadas: "80 (9.280 filas, 9.200 ids)"
+    tratamiento: "deduplicación por resena_id"
+  - problema: "metadata con estructura distinta según origen"
+    ejemplo: "app: {origen, app:{version, so}} / web: {origen, navegador} / tienda: {origen, kiosko_id, sucursal_id}"
+    filas_afectadas: "todas"
+    tratamiento: "VARIANT"

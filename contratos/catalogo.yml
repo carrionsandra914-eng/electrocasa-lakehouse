@@ -1,0 +1,92 @@
+# Contrato de datos: Catálogo de productos
+fuente: catalogo
+version: 1
+ultima_actualizacion: "2026-11-26"
+responsable: "area_comercial_compras"
+llegada: "JSON (un arreglo por archivo, multiLine) en /Volumes/<catalogo>/default/vol_landing/catalogo/"
+metodo_ingesta: "COPY INTO (tarea del job, fuera del pipeline): llega como snapshot completo pocas veces al año; una carga batch idempotente basta y COPY INTO no recarga archivos ya cargados"
+frecuencia_esperada: "eventual (snapshots completos: 1-mar y 1-ago)"
+tipo_entrega: "catálogo completo en cada archivo (snapshot)"
+tabla_bronze: "<catalogo>.bronze.catalogo"
+tabla_silver: "<catalogo>.silver.catalogo"
+llave: "producto_id"
+historizacion: "SCD Type 1: Silver guarda la versión del ÚLTIMO snapshot donde aparece cada producto (P5 pide la categoría del último snapshot). El precio anterior queda en Bronze (cada snapshot con su _lote). Los descontinuados (activo=false) se CONSERVAN marcados: tienen ventas y reseñas históricas que deben poder clasificarse."
+
+columnas:
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+  - nombre: nombre_producto
+    tipo: "string"
+    nulo: false
+  - nombre: categoria
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["linea_blanca", "cocina", "electronica", "climatizacion", "entretenimiento"]
+  - nombre: marca
+    tipo: "string"
+    nulo: true
+  - nombre: precio_lista
+    tipo: "decimal(12,2)"
+    nulo: true
+    regla: "numérico y mayor a 0; si es inválido queda NULL en Silver (warn)"
+  - nombre: activo
+    tipo: "boolean"
+    nulo: false
+  - nombre: fecha_snapshot
+    tipo: "date"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: precio_valido
+    condicion: "precio_lista IS NOT NULL AND precio_lista > 0"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Ninguna pregunta de negocio usa precio_lista; descartar el producto haría huérfanas sus ventas y reseñas y perderíamos su categoría (P5). Se conserva el producto con precio NULL y se registra la violación."
+  - nombre: producto_id_no_nulo
+    condicion: "producto_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin llave no se puede unir con ventas ni reseñas."
+  - nombre: categoria_conocida
+    condicion: "categoria IN ('linea_blanca','cocina','electronica','climatizacion','entretenimiento')"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Detecta variantes nuevas no mapeadas sin bloquear la carga."
+  - nombre: marca_informada
+    condicion: "marca IS NOT NULL"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Atributo descriptivo, no usado en las preguntas."
+
+transformaciones_silver:
+  - "categoria: minúsculas, sin tildes, espacios/guiones bajos unificados -> 5 valores"
+  - "precio_lista: 'S/ 1,299.90' -> 1299.90 (se quitan moneda y separador de miles); <=0 o ilegible -> NULL"
+  - "activo: texto 'true'/'false' -> boolean"
+  - "deduplicación por producto_id: gana el snapshot más reciente; dentro del snapshot de marzo, el precio válido y, entre válidos, el mayor"
+
+problemas_conocidos:
+  - problema: "precio_lista como texto con moneda"
+    ejemplo: "\"S/ 1,474.75\""
+    filas_afectadas: "90 (ambos snapshots)"
+    tratamiento: "normalización a decimal"
+  - problema: "precio_lista negativo, cero o nulo"
+    ejemplo: "-850.0 / 0 / null"
+    filas_afectadas: "58 <= 0 y 36 nulos"
+    tratamiento: "precio NULL + warn precio_valido"
+  - problema: "marca nula"
+    ejemplo: "\"marca\": null"
+    filas_afectadas: "94"
+    tratamiento: "warn marca_informada"
+  - problema: "categoria con 17 variantes para 5 categorías"
+    ejemplo: "Línea blanca, LINEA BLANCA, linea_blanca, Climatización, CLIMATIZACION"
+    filas_afectadas: "todas"
+    tratamiento: "mapeo a conjunto cerrado"
+  - problema: "productos duplicados en el snapshot de marzo con precios distintos"
+    ejemplo: "mismo producto_id dos veces en catalogo_productos_2026-03-01.json"
+    filas_afectadas: "25"
+    tratamiento: "deduplicación por producto_id"
+  - problema: "productos descontinuados en agosto"
+    ejemplo: "\"activo\": false"
+    filas_afectadas: "60"
+    tratamiento: "se conservan marcados con activo=false"

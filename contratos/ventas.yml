@@ -1,0 +1,139 @@
+# Contrato de datos: Ventas
+fuente: ventas
+version: 1
+ultima_actualizacion: "2026-11-26"
+responsable: "area_comercial"
+llegada: "CSV con encabezado, un archivo por lote en /Volumes/<catalogo>/default/vol_landing/ventas/"
+metodo_ingesta: "Auto Loader dentro del pipeline: llegan lotes incrementales (archivos nuevos) y solo hay que procesar lo nuevo; el pipeline gestiona checkpoint y schema location"
+frecuencia_esperada: "mensual o por cierre de período (lotes al 31-may, 31-ago, 31-oct)"
+tabla_bronze: "<catalogo>.bronze.ventas"
+tabla_silver: "<catalogo>.silver.ventas"
+llave: "venta_id"
+
+columnas:
+  - nombre: venta_id
+    tipo: "string"
+    nulo: false
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: producto_id
+    tipo: "string"
+    nulo: false
+    regla: "Si no existe en el catálogo la venta se CONSERVA (es dinero real cobrado) y se marca en_catalogo=false; expectativa warn producto_en_catalogo. En las preguntas por producto aparece sin nombre/categoría."
+  - nombre: vendedor_id
+    tipo: "string"
+    nulo: true
+    regla: "obligatorio solo en canal tienda_fisica (warn vendedor_en_tienda_fisica)"
+  - nombre: cantidad
+    tipo: "int"
+    nulo: false
+    regla: "mayor a 0"
+  - nombre: monto_total
+    tipo: "decimal(12,2)"
+    nulo: false
+    regla: "mayor a 0, después de normalizar coma decimal y punto de miles"
+  - nombre: metodo_pago
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["tarjeta", "efectivo", "transferencia", "yape", "plin"]
+  - nombre: fecha_venta
+    tipo: "date"
+    nulo: false
+  - nombre: canal
+    tipo: "string"
+    nulo: false
+    valores_permitidos: ["tienda_fisica", "ecommerce"]
+  - nombre: en_catalogo
+    tipo: "boolean"
+    nulo: false
+    regla: "columna derivada en Silver: true si producto_id existe en silver.catalogo"
+
+reglas_de_calidad:
+  - nombre: monto_positivo
+    condicion: "monto_total IS NOT NULL AND monto_total > 0"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Una venta con monto vacío, cero o negativo distorsiona ventas y ticket promedio (P1, P4). No se puede corregir sin la fuente: se descarta del cálculo y queda consultable en cuarentena."
+  - nombre: cantidad_positiva
+    condicion: "cantidad IS NOT NULL AND cantidad > 0"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Cantidad 0 no es una venta real y afecta el top de unidades (P2)."
+  - nombre: sucursal_informada
+    condicion: "sucursal_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin sucursal la venta no se puede atribuir en P1; asignarla a una sucursal inventada sería peor."
+  - nombre: fecha_valida
+    condicion: "fecha_venta IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin fecha no hay mes ni versión vigente del vendedor (P1, P4)."
+  - nombre: venta_id_no_nulo
+    condicion: "venta_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Es la llave: sin ella no se puede deduplicar ni contar ventas distintas."
+  - nombre: canal_valido
+    condicion: "canal IN ('tienda_fisica','ecommerce')"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "P4 filtra por canal; un canal desconocido no se puede clasificar."
+  - nombre: producto_en_catalogo
+    condicion: "en_catalogo"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena (politica=warn, el registro sí entra a Silver)"
+    justificacion: "La venta existió y su dinero cuenta en P1; solo falta el maestro del producto."
+  - nombre: metodo_pago_conocido
+    condicion: "metodo_pago <> 'otro'"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "No afecta ninguna pregunta de negocio; solo se monitorea."
+  - nombre: vendedor_en_tienda_fisica
+    condicion: "canal <> 'tienda_fisica' OR vendedor_id IS NOT NULL"
+    politica: "warn"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Sin vendedor la venta cuenta en P1 pero queda como SIN_ASIGNAR en P4."
+
+transformaciones_silver:
+  - "monto_total: '1.234,50' -> 1234.50 (si trae coma se quitan los puntos de miles y la coma pasa a punto), try_cast a decimal(12,2)"
+  - "fecha_venta: yyyy-MM-dd, dd/MM/yyyy y yyyy-MM-ddTHH:mm:ss -> DATE con try_to_timestamp (no falla con ANSI)"
+  - "metodo_pago: 17 variantes -> 5 valores (TC/td/tarjeta/Tarjeta de credito -> tarjeta; EFV/efectivo -> efectivo; TRF/transferencia -> transferencia; yape; plin)"
+  - "trim y vacío -> NULL en ids"
+  - "deduplicación por venta_id quedándose con la primera ingesta (reingestas idénticas del lote siguiente)"
+  - "join con silver.catalogo para marcar en_catalogo"
+
+problemas_conocidos:
+  - problema: "ventas reingestadas idénticas en el lote siguiente"
+    ejemplo: "venta presente en ventas_lote_01 y otra vez en ventas_lote_02"
+    filas_afectadas: "240 (18.240 filas en Bronze, 18.000 venta_id distintos)"
+    tratamiento: "deduplicación por venta_id en Silver"
+  - problema: "metodo_pago con 17 formas de escritura"
+    ejemplo: "PLIN, Plin, YAPE, yape, TRF, EFV, TC, td, Tarjeta de credito"
+    filas_afectadas: "todas"
+    tratamiento: "mapeo a conjunto cerrado de 5 valores"
+  - problema: "monto_total con coma decimal y punto de miles"
+    ejemplo: "3.468,69"
+    filas_afectadas: "244"
+    tratamiento: "normalización a decimal(12,2)"
+  - problema: "monto_total vacío, negativo o cero"
+    ejemplo: "'' / -1520.33 / 0"
+    filas_afectadas: "152 vacíos, 125 negativos, 76 en cero (antes de deduplicar)"
+    tratamiento: "regla monto_positivo (drop) -> cuarentena"
+  - problema: "cantidad en cero"
+    ejemplo: "cantidad=0"
+    filas_afectadas: "68"
+    tratamiento: "regla cantidad_positiva (drop)"
+  - problema: "sucursal_id vacío"
+    ejemplo: "VTA-xxxxx,,PRD-..."
+    filas_afectadas: "105"
+    tratamiento: "regla sucursal_informada (drop)"
+  - problema: "fecha_venta en tres formatos"
+    ejemplo: "2026-06-07 / 07/06/2026 / 2026-06-07T14:30:00"
+    filas_afectadas: "2.140 dd/MM/yyyy y 1.458 con hora"
+    tratamiento: "coalesce de try_to_timestamp con los tres formatos"
+  - problema: "producto_id inexistente en el catálogo"
+    ejemplo: "producto no presente en ningún snapshot"
+    filas_afectadas: "70"
+    tratamiento: "warn producto_en_catalogo; la venta se conserva"

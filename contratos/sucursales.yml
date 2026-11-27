@@ -1,0 +1,48 @@
+# Contrato de datos: Sucursales (referencia)
+fuente: sucursales
+version: 1
+ultima_actualizacion: "2026-11-26"
+responsable: "operaciones"
+llegada: "CSV con encabezado, archivo único en /Volumes/<catalogo>/default/vol_landing/sucursales/"
+metodo_ingesta: "COPY INTO (tarea del job): archivo único de 40 filas que casi no cambia; carga batch idempotente"
+frecuencia_esperada: "eventual (solo cuando abre o cambia una sucursal)"
+tabla_bronze: "<catalogo>.bronze.sucursales"
+tabla_silver: "<catalogo>.silver.sucursales"
+llave: "sucursal_id"
+
+columnas:
+  - nombre: sucursal_id
+    tipo: "string"
+    nulo: false
+  - nombre: nombre_sucursal
+    tipo: "string"
+    nulo: false
+  - nombre: distrito
+    tipo: "string"
+    nulo: false
+  - nombre: ciudad
+    tipo: "string"
+    nulo: false
+  - nombre: region
+    tipo: "string"
+    nulo: false
+  - nombre: fecha_apertura
+    tipo: "date"
+    nulo: false
+
+reglas_de_calidad:
+  - nombre: sucursal_id_no_nulo
+    condicion: "sucursal_id IS NOT NULL"
+    politica: "drop"
+    destino_rechazos: "<catalogo>.silver.cuarentena"
+    justificacion: "Es la llave con la que se unen ventas, devoluciones, empleados y despachos."
+
+transformaciones_silver:
+  - "ciudad, distrito y region en formato Título (initcap)"
+  - "fecha_apertura a DATE"
+
+problemas_conocidos:
+  - problema: "ciudad con casing inconsistente"
+    ejemplo: "AREQUIPA, PIURA"
+    filas_afectadas: "2"
+    tratamiento: "initcap(lower(ciudad))"
